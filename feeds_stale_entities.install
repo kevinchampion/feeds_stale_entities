@@ -1,0 +1,29 @@
+<?php
+/**
+ * @file
+ * Installation routines.
+ */
+
+/**
+ * Implements hook_uninstall().
+ *
+ * Delete all queues.
+ * Delete variable.
+ */
+function feeds_stale_entities_import_uninstall() {
+
+  $importer_info = variable_get('feeds_stale_entities_importer_info', array());
+
+  foreach ($importer_info as $importer_id => $importer) {
+
+    $queue_id = $importer_id . '_stale_entities';
+
+    $queue = DrupalQueue::get($queue_id);
+
+    $queue->deleteQueue();
+
+  }
+
+  variable_del('feeds_stale_entities_importer_info');
+
+}

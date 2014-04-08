@@ -1,0 +1,7 @@
+name = Feeds Stale Entities
+description = Creates a hook for exposing entities previously imported by a feed that are no longer in the data source.
+core = 7.x
+package = Feeds
+version = 7.x-1.0
+project = feeds_stale_entities
+dependencies[] = feeds

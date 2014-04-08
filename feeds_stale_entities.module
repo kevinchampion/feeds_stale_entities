@@ -1,0 +1,244 @@
+<?php
+/**
+ * @file
+ * Code for the Feeds Stale Entities module.
+ */
+
+
+/**
+ * Implements hook_feeds_before_import().
+ *
+ * @param FeedsSource $source
+ *   FeedsSource object that describes the source that has been imported.
+ */
+function feeds_stale_entities_feeds_before_import($source) {
+
+  $monitor = array();
+  // Retrieve list of importer ids to monitor for stale entities. If an importer
+  // is not explicitly defined, don't monitor it.
+  drupal_alter('feeds_stale_entities_info', $monitor);
+
+  if (!empty($monitor[$source->importer->id])) {
+
+    $importer_info = variable_get('feeds_stale_entities_importer_info', array());
+
+    if (empty($importer_info[$source->importer->id])) {
+
+      $importer_info[$source->importer->id] = array();
+
+    }
+
+    $importer_info[$source->importer->id]['start'] = REQUEST_TIME;
+    $importer_info[$source->importer->id]['refresh'] = $monitor[$source->importer->id]['refresh'];
+
+    // Save timestamp to variable.
+    variable_set('feeds_stale_entities_importer_info', $importer_info);
+
+  }
+
+}
+
+/**
+ * Implements hook_feeds_after_import().
+ *
+ * Invoked after a feed source has been imported.
+ *
+ * @param FeedsSource $source
+ *   FeedsSource object that describes the source that has been imported.
+ *
+ *   This is used to create a hook when entities that were previously imported
+ *   are no longer present in the data source. Modules implementing this hook
+ *   may want to unpublish or delete such entities.
+ */
+function feeds_stale_entities_feeds_after_import($source) {
+
+  if ($source->state(FEEDS_PROCESS)->progress != 1) {
+    return;
+  }
+
+  $importer_info = variable_get('feeds_stale_entities_importer_info', array());
+
+  if (!empty($importer_info[$source->importer->id])) {
+
+    // Set published status = 0 if they weren't imported*
+    $subquery = db_select('feeds_item', 'fi');
+    $subquery->addField('fi', 'entity_id');
+    $subquery->condition('fi.imported', $importer_info[$source->importer->id]['start'], '<');
+    $subquery->condition('fi.id', $source->importer->id);
+    $result = $subquery->execute();
+
+    $entity_ids = array();
+
+    while ($item = $result->fetchObject()) {
+      $entity_ids[] = $item->entity_id;
+    }
+
+    $num_entities = count($entity_ids);
+
+    if ($num_entities > 0) {
+
+      // Save that the importer doesn't have any unprocessed stale entities.
+      $importers[$source->importer->id]['stale_entities'] = TRUE;
+      variable_set('feeds_stale_entities_importer_info', $importers);
+
+      _feeds_stale_entities_log('stale_entities_found', array('importer_id' => $source->importer->id, 'num_entities' => $num_entities, 'entity_ids' => $entity_ids));
+
+      _feeds_stale_entities_setup_queue($source->importer->id, $entity_ids, $importers[$source->importer->id]['refresh']);
+
+    }
+
+  }
+
+}
+
+/**
+ * Implements hook_cron().
+ *
+ * Retrieves importer info, cycles through it, determines whether a queue for it
+ * already exists, attempts to retrieve an item from the queue if so, invokes
+ * hook_feeds_stale_entities, removes item from the queue.
+ */
+function feeds_stale_entities_cron() {
+
+  $importer_info = variable_get('feeds_stale_entities_importer_info', array());
+
+  foreach ($importer_info as $importer_id => $importer) {
+
+    // Check if there are supposed to be any stale entities and exit if not.
+    if (empty($importer_info[$importer_id]['stale_entities'])) {
+      return;
+    }
+
+    $queue_id = $importer_id . '_stale_entities';
+
+    $queue = DrupalQueue::get($queue_id);
+
+    $item = $queue->claimItem();
+    $count = $queue->numberOfItems();
+
+    if (!empty($item)) {
+
+      module_invoke_all('feeds_stale_entities', $importer_id, $item->data);
+
+      _feeds_stale_entities_log('queue_item_processed', array('queue_id' => $queue_id, 'importer_id' => $importer_id, 'num_items' => $count, 'entity_ids' => $item->data, 'item_id' => $item->item_id));
+
+      // Delete the item from the queue that has now been passed through
+      // hook invocation.
+      $queue->deleteItem($item);
+
+    }
+    else {
+
+      // Save that the importer doesn't have any unprocessed stale entities.
+      $importer_info[$importer_id]['stale_entities'] = FALSE;
+      variable_set('feeds_stale_entities_importer_info', $importer_info);
+      // Delete the queue so it doesn't linger around.
+      // Note: This makes an assumption that the queue is empty and can be
+      //       safely removed. The queue api documentation explicitly states
+      //       that not finding an item may not always indicate that the queue
+      //       is empty. So, if problems arise, this would be a good step to
+      //       interrogate.
+      $queue->deleteQueue();
+
+      _feeds_stale_entities_log('queue_deleted', array('queue_id' => $queue_id));
+
+    }
+
+  }
+
+}
+
+/**
+ * Chunks stale entities into batches and adds them to a queue specific to each
+ * importer.
+ *
+ * @param $importer_id
+ *   The textual importer id of the feeds importer.
+ * @param $entity_ids
+ *   Array of stale entity ids that need to be passed along through a hook
+ *   invocation so other modules can process them.
+ * @param $refresh
+ *   Boolean, if TRUE, delete the queue before adding to it.
+ */
+function _feeds_stale_entities_setup_queue($importer_id, $entity_ids, $refresh = TRUE) {
+
+  if (empty($importer_id)) {
+    return;
+  }
+
+  // TODO: Decide if chunk size needs to be exposed as variable.
+  $batch_size = 20;
+
+  // Break up all of our data so each process does not time out.
+  $chunks = array_chunk($entity_ids, $batch_size);
+  $num_chunks = count($chunks);
+
+  $queue_id = $importer_id . '_stale_entities';
+
+  // Delete the queue first so items aren't piled on if they haven't processed
+  // yet.
+  if ($refresh) {
+
+    $queue = DrupalQueue::get($queue_id, TRUE);
+    $queue->deleteQueue();
+
+  }
+
+  // Get a queue (of the default type). If the default queue class is
+  // SystemQueue this creates a queue that stores its items in the database.
+  $queue = DrupalQueue::get($queue_id, TRUE);
+  // There is no harm in trying to recreate existing.
+  $queue->createQueue();
+
+  // For every chunk, add to the queue.
+  foreach ($chunks as $chunk) {
+
+    $queue->createItem($chunk);
+
+  }
+
+  _feeds_stale_entities_log('queue_created', array('queue_id' => $queue_id, 'num_chunks' => $num_chunks, 'batch_size' => $batch_size));
+
+}
+
+/**
+ * Log feeds_stale_entities actions.
+ *
+ * @param $op
+ *   String id of the operation.
+ * @param $data
+ *   Associative array of useful information for log output messages.
+ */
+function _feeds_stale_entities_log($op, $data) {
+
+  switch ($op) {
+
+    case 'queue_created':
+
+      watchdog('feeds_stale_entities', 'A batch queue named \'@queue_id\' was created with @num_chunks items in it in batches of @batch_size. Entity ids will be passed through hook_feeds_stale_entities in feeds_stale_entities_cron until the queue is empty.', array('@queue_id' => $data['queue_id'], '@num_chunks' => $data['num_chunks'], '@batch_size' => $data['batch_size']), WATCHDOG_NOTICE);
+
+      break;
+
+    case 'stale_entities_found':
+
+      watchdog('feeds_stale_entities', '@count stale entities were found after completing the last Feeds @importer import. Entity ids: !replace', array('@count' => $data['num_entities'], '@importer' => $data['importer_id'], '!replace' => '<pre>' . print_r($data['entity_ids'], TRUE) . '</pre>'), WATCHDOG_NOTICE);
+
+      break;
+
+    case 'queue_item_processed':
+
+      watchdog('feeds_stale_entities', 'Item @item_id from queue \'@queue_id\' was processed for importer \'@importer_id\'. Entity ids in this item were passed to hook_feeds_stale_entities and the queue now has @num_items batches remaining. Entity ids: !entity_ids', array('@item_id' => $data['item_id'], '@queue_id' => $data['queue_id'], '@importer_id' => $data['importer_id'], '@num_items' => ($data['num_items'] - 1), '!entity_ids' => '<pre>' . print_r($data['entity_ids'], TRUE) . '</pre>'), WATCHDOG_NOTICE);
+
+      break;
+
+    case 'queue_deleted':
+
+      watchdog('feeds_stale_entities', 'A batch queue named \'@queue_id\' was deleted because no items were found in it.', array('@queue_id' => $data['queue_id']), WATCHDOG_NOTICE);
+
+      break;
+
+  }
+
+}
+
+
