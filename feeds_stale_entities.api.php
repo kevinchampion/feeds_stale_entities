@@ -20,13 +20,15 @@
  *   Associative array of importer ids. For feeds_stale_entities to monitor
  *   importers, the importer id must be explicitly returned using this hook.
  *   The 'refresh' parameter determines whether or not the queue should be
- *   deleted before new items are added.
+ *   deleted before new items are added. The 'entity_type' parameter helps
+ *   narrow down the query so extraneous results aren't returned.
  */
 function hook_feeds_stale_entities_info_alter(&$importer_ids) {
 
   $importer_ids['my_importer'] = array(
     'importer_id' => 'my_importer',
     'refresh' => TRUE,
+    'entity_type' => 'node',
   );
 
 }
@@ -55,6 +57,6 @@ function hook_feeds_stale_entities($import_id, $entity_ids) {
 
   // We don't need to worry about batching these because the hook is already
   // invoked per batch.
-  $nodes = node_delete_multiple($entity_ids);
+  entity_delete_multiple('node', $entity_ids);
 
 }
