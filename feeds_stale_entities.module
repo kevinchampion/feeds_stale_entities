@@ -78,12 +78,12 @@ function feeds_stale_entities_feeds_after_import($source) {
     if ($num_entities > 0) {
 
       // Save that the importer doesn't have any unprocessed stale entities.
-      $importers[$source->importer->id]['stale_entities'] = TRUE;
-      variable_set('feeds_stale_entities_importer_info', $importers);
+      $importer_info[$source->importer->id]['stale_entities'] = TRUE;
+      variable_set('feeds_stale_entities_importer_info', $importer_info);
 
       _feeds_stale_entities_log('stale_entities_found', array('importer_id' => $source->importer->id, 'num_entities' => $num_entities, 'entity_ids' => $entity_ids));
 
-      _feeds_stale_entities_setup_queue($source->importer->id, $entity_ids, $importers[$source->importer->id]['refresh']);
+      _feeds_stale_entities_setup_queue($source->importer->id, $entity_ids, $importer_info[$source->importer->id]['refresh']);
 
     }
 
@@ -179,8 +179,10 @@ function _feeds_stale_entities_setup_queue($importer_id, $entity_ids, $refresh =
   // yet.
   if ($refresh) {
 
-    $queue = DrupalQueue::get($queue_id, TRUE);
+    $queue = DrupalQueue::get($queue_id);
     $queue->deleteQueue();
+    _feeds_stale_entities_log('queue_refresh', array('queue_id' => $queue_id));
+
 
   }
 
@@ -234,6 +236,12 @@ function _feeds_stale_entities_log($op, $data) {
     case 'queue_deleted':
 
       watchdog('feeds_stale_entities', 'A batch queue named \'@queue_id\' was deleted because no items were found in it.', array('@queue_id' => $data['queue_id']), WATCHDOG_NOTICE);
+
+      break;
+
+    case 'queue_refresh':
+
+      watchdog('feeds_stale_entities', 'A batch queue named \'@queue_id\' was deleted because it needed to be refreshed.', array('@queue_id' => $data['queue_id']), WATCHDOG_NOTICE);
 
       break;
 
